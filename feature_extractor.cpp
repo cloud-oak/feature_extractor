@@ -37,8 +37,6 @@ typedef array<float, BANDS> Point;
 typedef vector<Point> PointCloud;
 typedef pair<vector<float>, vector<PointCloud>> timeseries;
 
-bool debug_mode = false;
-
 time_t basetime;
 
 struct result
@@ -160,8 +158,6 @@ vector<float> get_features(timeseries data, float subsample=1.0f, float quantile
   {
     for(size_t band = 0; band < BANDS; ++band)
     {
-      if(debug_mode)
-        cout << "Band " << band << endl;
       vector<float> points;
       for(size_t i = 0; i < point_cloud.size(); ++i)
       {
@@ -261,14 +257,10 @@ void work(size_t thread_id)
         todo.pop();
       }
     }
-    if(debug_mode)
-      cout << "Pre-Parse..." << endl;
     timeseries data = parse(
         "/home/konrad/dev/remote_sensing/ibiss_processed/cubes/" + number
     );
 
-    if(debug_mode)
-      cout << "Pre-Calculate..." << endl;
     results[thread_id].push_back({ number, 'F', get_features(data, 0.5) });
     for(float quantile : {0.4f, 0.5f, 0.6f})
       for(float subset : {0.3f, 0.5f, 0.7f})
