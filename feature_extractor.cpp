@@ -1,6 +1,6 @@
 #include <iostream>
 #include <string>
-#include <utility>
+// #include <utility> ?
 #include <vector>
 #include "cnpy.h"
 #include "float_conversion.h"
@@ -11,6 +11,7 @@
 #include <mutex>
 #include <queue>
 #include <algorithm>
+#include <random>
 
 using namespace std;
 using namespace std::string_literals;
@@ -28,21 +29,33 @@ constexpr size_t CLOUDS =  9;
 constexpr size_t SHAPE  = 10;
 
 constexpr size_t NUM_THREADS = 8;
-constexpr size_t BANDS = 4;
-constexpr size_t QUANTILES = 5;
+constexpr size_t BANDS = 3;
+constexpr size_t QUANTILES = 1;
+constexpr size_t SAMPLES = 8;
 
 typedef array<float, BANDS> Point;
 typedef vector<Point> PointCloud;
 typedef pair<vector<float>, vector<PointCloud>> timeseries;
 
+bool debug_mode = false;
+
 time_t basetime;
 
+struct result
+{
+  string number;
+  char type;
+  vector<float> features;
+};
+
 array<thread, NUM_THREADS> threads;
-array<vector<pair<string, vector<float>>>, NUM_THREADS> results;
+array<string, NUM_THREADS> current;
+array<vector<result>, NUM_THREADS> results;
 mutex queue_lock;
 queue<string> todo;
 
 #define DATA(b) half_to_float(raw.data<uint16_t>()[ b * W * H * T + x * H * T + y * T + t ])
+
 
 timeseries parse(string filename)
 {
@@ -70,7 +83,7 @@ timeseries parse(string filename)
     indexfile.close();
   }
 
-  size_t B = raw.shape[0];
+  //  size_t B = raw.shape[0];
   size_t W = raw.shape[1];
   size_t H = raw.shape[2];
   size_t T = raw.shape[3];
@@ -97,14 +110,14 @@ timeseries parse(string filename)
                 g    = DATA(GREEN),
                 b    = DATA(BLUE),
                 nir  = DATA(NIR),
-                swir = DATA(SWIR1);
+                re1  = DATA(RE1),
+                re3  = DATA(RE3);
           if(r == 0 && g == 0 && b == 0)
             ++glitchy_points;
           points.push_back({
               (nir  -   r) / (nir +    r + 0.5f) * 1.5f, // SAVI
-              (   r -   b) / (  r +    b + 0.5f) * 1.5f, // Redness
-              (   g -   b) / (  g +    b + 0.5f) * 1.5f, // Greenness
-              (swir - nir) / (nir + swir + 0.5f) * 1.5f  // 
+              (   g -   r) / (  r +    g + 0.5f) * 1.5f, // Greenness
+              ( re1 - re3) / (re1 +  re3 + 0.5f) * 1.5f, // RedEdge
           });
         }
       }
@@ -119,69 +132,93 @@ timeseries parse(string filename)
   return make_pair(timestamps, all_points);
 }
 
-vector<float> get_features(timeseries data)
+vector<float> get_features(timeseries data, float subsample=1.0f, float quantile=0.5f)
 {
+  // sort(data.begin(), data.end(), [](const auto & a, const auto & b) { return a.first < b.first; });
   vector<float> time = data.first;
   vector<PointCloud> point_series  = data.second;
+  int count = point_series[0].size();
+
+  vector<bool> used(count, true);
+  if(subsample < 1.0f)
+  {
+    count = 0;
+    random_device rd;
+    mt19937 random(rd());
+    uniform_real_distribution<> real(0.0, 1.0);
+    for(auto &&b : used)
+    {
+      b = real(random) < subsample;
+      count += b;
+    }
+  }
+
   vector<float> features;
   array<vector<float>, QUANTILES * BANDS> Q;
 
-  float max_time = 0;
-  for(size_t t = 0; t < time.size(); ++t)
-  {
-    if(time[t] > max_time)
-      max_time = time[t];
-  }
-  for(size_t t = 0; t < time.size(); ++t)
-  {
-    time[t] -= max_time;
-  }
-
   for(PointCloud point_cloud : point_series)
   {
-    for(size_t band = 0; band < 4; ++band)
+    for(size_t band = 0; band < BANDS; ++band)
     {
+      if(debug_mode)
+        cout << "Band " << band << endl;
       vector<float> points;
-      for(Point p : point_cloud)
-        points.push_back(p[band]);
-      sort(points.begin(), points.end());
+      for(size_t i = 0; i < point_cloud.size(); ++i)
+      {
+        if(used[i] && !isnan(point_cloud[i][band]))
+        {
+          points.push_back(point_cloud[i][band]);
+        }
+      }
+      if(points.size() > 0)
+      {
+        sort(points.begin(), points.end());
 
-      Q[QUANTILES * band + 0].push_back(points[size_t(points.size() * 0.1)]);
-      Q[QUANTILES * band + 1].push_back(points[size_t(points.size() * 0.2)]);
-      Q[QUANTILES * band + 2].push_back(points[size_t(points.size() * 0.5)]);
-      Q[QUANTILES * band + 3].push_back(points[size_t(points.size() * 0.8)]);
-      Q[QUANTILES * band + 4].push_back(points[size_t(points.size() * 0.9)]);
+        Q[band].push_back(points[size_t(points.size() * quantile)]);
+      }
+      else
+      {
+        Q[band].push_back(0);
+      }
     }
   }
 
   for(auto q : Q)
   {
     float integral = 0;
-    array<float, 8> hats;
-    array<float, 8> sincs;
-    for(size_t i = 0; i < 8; ++i)
-    {
-      hats[i] = 0;
-      sincs[i] = 0;
-    }
+    vector<float> smooth(SAMPLES, 0);
+    vector<float> diff(SAMPLES, 0);
     float max_time = -1e10;
     float min_time = -1e10;
     float max      = -1e10;
     float min      =  1e10;
     for(size_t t = 0; t < q.size(); ++t)
     {
-      float dt = 0;
       if(t > 0)
-        dt += (time[t] - time[t-1]) / 2;
-      if(t < q.size() - 1)
-        dt += (time[t+1] - time[t]) / 2;
-      for(size_t month = 0; month < 8; month++)
       {
-        sincs[month] += dt * sinc(q[t], month);
-        hats[month] += dt * sinc(q[t], month);
-      }
-      integral += q[t] * dt;
+        // Do Integral Transforms
+        float dt = time[t] - time[t-1];
+        int subdivs = ceil(dt / 1.0f);
+        float timestep = dt / subdivs;
+        float val_r  =    q[t];
+        float time_r = time[t];
+        for(int s = 0; s < subdivs - 1; ++s)
+        {
+          float lambda = float(s + 1) / subdivs;
+          float val_l  = (1 - lambda) *    q[t] + lambda *    q[t-1];
+          float time_l = (1 - lambda) * time[t] + lambda * time[t-1]; 
 
+          integral += timestep * 0.5 * (val_l + val_r);
+          for(size_t i = 0; i < SAMPLES; i++)
+          {
+            float offset = 2.0f + i * (7.0f / SAMPLES);
+            smooth[i] += timestep * 0.5 * (val_l * esmooth(time_l, offset) + val_r * esmooth(time_r, offset));
+            diff  [i] += timestep * 0.5 * (val_l *   ediff(time_l, offset) + val_r *   ediff(time_r, offset));
+          }
+          val_r  = val_l;
+          time_r = time_l;
+        }
+      }
       if(q[t] > max)
       {
         max_time = time[t];
@@ -193,11 +230,12 @@ vector<float> get_features(timeseries data)
         min = q[t];
       }
     }
+
     features.push_back(integral);
-    for(size_t month = 0; month < 8; month++)
-      features.push_back(hats[month]);
-    for(size_t month = 0; month < 8; month++)
-      features.push_back(sincs[month]);
+    for(size_t i = 0; i < SAMPLES; i++)
+      features.push_back(smooth[i]);
+    for(size_t i = 0; i < SAMPLES; i++)
+      features.push_back(diff[i]);
     features.push_back(min_time);
     features.push_back(max_time);
   }
@@ -207,6 +245,7 @@ vector<float> get_features(timeseries data)
 
 void work(size_t thread_id)
 {
+  current[thread_id] = "Initializing";
   bool running = true;
   string number = "";
   while(running)
@@ -215,19 +254,27 @@ void work(size_t thread_id)
       lock_guard<mutex> lock(queue_lock);
       if(todo.empty())
       {
-        running = false;
         break;
       } else {
         number = todo.front();
+        current[thread_id] = number;
         todo.pop();
       }
     }
+    if(debug_mode)
+      cout << "Pre-Parse..." << endl;
     timeseries data = parse(
         "/home/konrad/dev/remote_sensing/ibiss_processed/cubes/" + number
     );
 
-    results[thread_id].push_back(make_pair(number, get_features(data)));
+    if(debug_mode)
+      cout << "Pre-Calculate..." << endl;
+    results[thread_id].push_back({ number, 'F', get_features(data, 0.5) });
+    for(float quantile : {0.4f, 0.5f, 0.6f})
+      for(float subset : {0.3f, 0.5f, 0.7f})
+        results[thread_id].push_back({ number, 'S', get_features(data, subset, quantile) });
   }
+  current[thread_id] = "Done";
 }
 
 int main(int argc, char **argv)
@@ -262,29 +309,64 @@ int main(int argc, char **argv)
 
   cout << "Beginning feature extraction" << endl;
   auto features = vector<pair<string, vector<float>>>(count);
+  size_t num = features.size();
+
+  for(size_t i = 0; i < 100; ++i)
+    cout << '_';
+  cout << endl;
 
   for(size_t i = 0; i < NUM_THREADS; ++i)
   {
     threads[i] = thread(work, i);
   }
 
+  size_t progress = 100;
+  while(progress > 0)
+  {
+    if(progress * num > todo.size() * 100)
+    {
+      cout << '#' << flush;
+      --progress;
+    }
+    else
+    {
+      this_thread::sleep_for(100ms);
+    }
+  }
+
+  cout << endl;
+  for(size_t i = 0; i < NUM_THREADS; ++i)
+  {
+    cout << "Thread (" << i << ") processed " << results[i].size() << " elements" << endl;
+  }
+
   for(size_t i = 0; i < NUM_THREADS; ++i)
   {
     threads[i].join();
   }
+  cout << "\nCollected all threads" << endl;
+
+  cout << "\nWriting CSV..." << endl;
 
   ofstream out("/home/konrad/dev/remote_sensing/ibiss_processed/cfeatures.csv");
+
+  for(size_t i = 0; i < 8*NUM_THREADS; ++i)
+    cout << '_';
+  cout << endl;
+
   for(size_t i = 0; i < NUM_THREADS; ++i)
   {
     for(auto p : results[i])
     {
-      out << p.first;
-      for(auto val : p.second)
+      out << p.number << ',' << p.type;
+      for(auto val : p.features)
         out << "," << val;
       out << '\n';
     }
+    cout << "########" << flush;
     results[i].clear();
   }
+  cout << endl;
   out.close();
 
   return 0;

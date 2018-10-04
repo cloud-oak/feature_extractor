@@ -1,10 +1,23 @@
 // Taken from 
 // https://github.com/halide/Halide/blob/master/src/Float16.cpp
+#include <cstring>
+#include <iostream>
+#include <cmath>
+using std::memcpy;
 
 static const int mantissa_bits = 10;
 static const uint16_t sign_mask = 0x8000;
 static const uint16_t exponent_mask = 0x7c00;
 static const uint16_t mantissa_mask = 0x03ff;
+
+/** An aggressive form of reinterpret cast used for correct type-punning. */
+template<typename DstType, typename SrcType>
+DstType reinterpret_bits(const SrcType &src) {
+    static_assert(sizeof(SrcType) == sizeof(DstType), "Types must be same size");
+    DstType dst;
+    memcpy(&dst, &src, sizeof(SrcType));
+    return dst;
+}
 
 float half_to_float(const uint16_t& value) {
     // There aren't all that many float16_t values, so a few lookup tables suffice.
@@ -283,5 +296,9 @@ float half_to_float(const uint16_t& value) {
     int sign_and_exponent = value >> mantissa_bits;
     int offset = offset_table[sign_and_exponent] + (value & mantissa_mask);
     uint32_t bits = (mantissa_table[offset] + exponent_table[sign_and_exponent]);
-    return reinterpret_cast<float &>(bits);
+
+    if(bits == 2143289344)
+      return 0; // Coerce NaN
+    float out = reinterpret_bits<float>(bits);
+    return out;
 }
