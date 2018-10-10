@@ -12,6 +12,7 @@
 #include <queue>
 #include <algorithm>
 #include <random>
+#include <complex>
 
 using namespace std;
 using namespace std::string_literals;
@@ -29,9 +30,13 @@ constexpr size_t CLOUDS =  9;
 constexpr size_t SHAPE  = 10;
 
 constexpr size_t NUM_THREADS = 8;
-constexpr size_t BANDS = 3;
+constexpr size_t BANDS = 1;
 constexpr size_t QUANTILES = 1;
-constexpr size_t SAMPLES = 8;
+
+constexpr float START_DAY = 31 + 28; // Only use images starting in March
+
+const vector<float> FREQUENCIES = { 0.0, 1.0, 2.0, 3.0, 4.0, 6 };
+const int           NUM_FOURIER = FREQUENCIES.size();
 
 typedef array<float, BANDS> Point;
 typedef vector<Point> PointCloud;
@@ -42,7 +47,6 @@ time_t basetime;
 struct result
 {
   string number;
-  char type;
   vector<float> features;
 };
 
@@ -54,6 +58,23 @@ queue<string> todo;
 
 #define DATA(b) half_to_float(raw.data<uint16_t>()[ b * W * H * T + x * H * T + y * T + t ])
 
+float clamp(float x, float min=-2, float max=2)
+{
+  if (x > max)
+  {
+    cout << "Clamped " << x << endl;
+    return max;
+  }
+  else if (x < min)
+  {
+    cout << "Clamped " << x << endl;
+    return min;
+  }
+  else
+  {
+    return x;
+  }
+}
 
 timeseries parse(string filename)
 {
@@ -75,7 +96,7 @@ timeseries parse(string filename)
     {
       struct tm tm;
       strptime(line.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
-      float diff = difftime(mktime(&tm), basetime) / (60 * 60 * 24);
+      float diff = difftime(mktime(&tm), basetime) / (60 * 60 * 24) - START_DAY;
       timestamps.push_back(diff);
     }
     indexfile.close();
@@ -85,16 +106,18 @@ timeseries parse(string filename)
   size_t W = raw.shape[1];
   size_t H = raw.shape[2];
   size_t T = raw.shape[3];
+  vector<float> used_timestamps;
 
   assert(timestamps.size() == T);
 
   for(size_t t = 0; t < T; ++t)
   {
-    // half_to_float();
+    if(timestamps[t] <= 0)
+      continue;
     PointCloud points;
     size_t glitchy_points = 0,
-           cloudy_points = 0,
-           total_points = 0;
+           cloudy_points  = 0,
+           total_points   = 0;
     for(size_t x = 0; x < W; ++x)
     {
       for(size_t y = 0; y < H; ++y)
@@ -107,136 +130,26 @@ timeseries parse(string filename)
           float r    = DATA(RED),
                 g    = DATA(GREEN),
                 b    = DATA(BLUE),
-                nir  = DATA(NIR),
-                re1  = DATA(RE1),
-                re3  = DATA(RE3);
-          if(r == 0 && g == 0 && b == 0)
+                nir  = DATA(NIR);
+                // swir = DATA(SWIR1),
+                // re2  = DATA(RE2);
+          if(r == 0 || g == 0 || b == 0)
             ++glitchy_points;
           points.push_back({
-              (nir  -   r) / (nir +    r + 0.5f) * 1.5f, // SAVI
-              (   g -   r) / (  r +    g + 0.5f) * 1.5f, // Greenness
-              ( re1 - re3) / (re1 +  re3 + 0.5f) * 1.5f, // RedEdge
+              clamp((nir  -   r) / (nir  + r + 1e-8)), // NDVI
           });
         }
       }
     }
-    if(cloudy_points > 0.2 * total_points)
+    if(cloudy_points  > 0.2 * total_points)
       continue;
     if(glitchy_points > 0.2 * total_points)
       continue;
     all_points.push_back(points);
+    used_timestamps.push_back(timestamps[t]);
   }
 
-  return make_pair(timestamps, all_points);
-}
-
-vector<float> get_features(timeseries data, float subsample=1.0f, float quantile=0.5f)
-{
-  // sort(data.begin(), data.end(), [](const auto & a, const auto & b) { return a.first < b.first; });
-  vector<float> time = data.first;
-  vector<PointCloud> point_series  = data.second;
-  int count = point_series[0].size();
-
-  vector<bool> used(count, true);
-  if(subsample < 1.0f)
-  {
-    count = 0;
-    random_device rd;
-    mt19937 random(rd());
-    uniform_real_distribution<> real(0.0, 1.0);
-    for(auto &&b : used)
-    {
-      b = real(random) < subsample;
-      count += b;
-    }
-  }
-
-  vector<float> features;
-  array<vector<float>, QUANTILES * BANDS> Q;
-
-  for(PointCloud point_cloud : point_series)
-  {
-    for(size_t band = 0; band < BANDS; ++band)
-    {
-      vector<float> points;
-      for(size_t i = 0; i < point_cloud.size(); ++i)
-      {
-        if(used[i] && !isnan(point_cloud[i][band]))
-        {
-          points.push_back(point_cloud[i][band]);
-        }
-      }
-      if(points.size() > 0)
-      {
-        sort(points.begin(), points.end());
-
-        Q[band].push_back(points[size_t(points.size() * quantile)]);
-      }
-      else
-      {
-        Q[band].push_back(0);
-      }
-    }
-  }
-
-  for(auto q : Q)
-  {
-    float integral = 0;
-    vector<float> smooth(SAMPLES, 0);
-    vector<float> diff(SAMPLES, 0);
-    float max_time = -1e10;
-    float min_time = -1e10;
-    float max      = -1e10;
-    float min      =  1e10;
-    for(size_t t = 0; t < q.size(); ++t)
-    {
-      if(t > 0)
-      {
-        // Do Integral Transforms
-        float dt = time[t] - time[t-1];
-        int subdivs = ceil(dt / 1.0f);
-        float timestep = dt / subdivs;
-        float val_r  =    q[t];
-        float time_r = time[t];
-        for(int s = 0; s < subdivs - 1; ++s)
-        {
-          float lambda = float(s + 1) / subdivs;
-          float val_l  = (1 - lambda) *    q[t] + lambda *    q[t-1];
-          float time_l = (1 - lambda) * time[t] + lambda * time[t-1]; 
-
-          integral += timestep * 0.5 * (val_l + val_r);
-          for(size_t i = 0; i < SAMPLES; i++)
-          {
-            float offset = 2.0f + i * (7.0f / SAMPLES);
-            smooth[i] += timestep * 0.5 * (val_l * esmooth(time_l, offset) + val_r * esmooth(time_r, offset));
-            diff  [i] += timestep * 0.5 * (val_l *   ediff(time_l, offset) + val_r *   ediff(time_r, offset));
-          }
-          val_r  = val_l;
-          time_r = time_l;
-        }
-      }
-      if(q[t] > max)
-      {
-        max_time = time[t];
-        max = q[t];
-      }
-      if(q[t] < min)
-      {
-        min_time = time[t];
-        min = q[t];
-      }
-    }
-
-    features.push_back(integral);
-    for(size_t i = 0; i < SAMPLES; i++)
-      features.push_back(smooth[i]);
-    for(size_t i = 0; i < SAMPLES; i++)
-      features.push_back(diff[i]);
-    features.push_back(min_time);
-    features.push_back(max_time);
-  }
-
-  return features;
+  return make_pair(used_timestamps, all_points);
 }
 
 void work(size_t thread_id)
@@ -261,10 +174,36 @@ void work(size_t thread_id)
         "/home/konrad/dev/remote_sensing/ibiss_processed/cubes/" + number
     );
 
-    results[thread_id].push_back({ number, 'F', get_features(data, 0.5) });
-    for(float quantile : {0.4f, 0.5f, 0.6f})
-      for(float subset : {0.3f, 0.5f, 0.7f})
-        results[thread_id].push_back({ number, 'S', get_features(data, subset, quantile) });
+//    results[thread_id].push_back({ number, 'F', get_features(data) });
+    vector<float> time = data.first;
+    vector<PointCloud> point_series = data.second;
+    int N = point_series.size();
+    int P = point_series[0].size();
+
+    array<vector<float>, BANDS> Q; // Q contains the mean values per band
+
+    for(int p = 0; p < P; p += 5)
+    {
+      vector<float> features;
+      for(size_t band = 0; band < BANDS; ++band)
+      {
+        vector<complex<float>> coefficients(NUM_FOURIER, 0);
+
+        // Non-uniform discrete Fourier transform
+        for(int i = 0; i < N; ++i)
+          for(int k = 0; k < NUM_FOURIER; ++k)
+          {
+            auto cmp = complex<float>(0, -2 * M_PI / 365.0f * time[i] * FREQUENCIES[k]);
+            coefficients[k] += point_series[i][p][band] * exp(cmp);
+          }
+        for(int k = 0; k < NUM_FOURIER; ++k)
+        {
+          features.push_back(coefficients[k].real() / N);
+          features.push_back(coefficients[k].imag() / N);
+        }
+      }
+      results[thread_id].push_back({ number, features });
+    }
   }
   current[thread_id] = "Done";
 }
@@ -350,7 +289,7 @@ int main(int argc, char **argv)
   {
     for(auto p : results[i])
     {
-      out << p.number << ',' << p.type;
+      out << p.number;
       for(auto val : p.features)
         out << "," << val;
       out << '\n';
