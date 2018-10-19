@@ -4,7 +4,6 @@
 #include <vector>
 #include "cnpy.h"
 #include "float_conversion.h"
-#include "transforms.h"
 #include <fstream>
 #include <chrono>
 #include <thread>
@@ -12,6 +11,7 @@
 #include <queue>
 #include <algorithm>
 #include <random>
+#include <complex>
 
 using namespace std;
 using namespace std::string_literals;
@@ -30,8 +30,10 @@ constexpr size_t SHAPE  = 10;
 
 constexpr size_t NUM_THREADS = 8;
 constexpr size_t BANDS = 3;
-constexpr size_t QUANTILES = 1;
 constexpr size_t SAMPLES = 8;
+
+const vector<float> FREQUENCIES = { 0.0, 1.0, 2.0, 3.0, 4.0, 6 };
+const int NUM_FOURIER = FREQUENCIES.size();
 
 typedef array<float, BANDS> Point;
 typedef vector<Point> PointCloud;
@@ -53,7 +55,6 @@ mutex queue_lock;
 queue<string> todo;
 
 #define DATA(b) half_to_float(raw.data<uint16_t>()[ b * W * H * T + x * H * T + y * T + t ])
-
 
 timeseries parse(string filename)
 {
@@ -136,6 +137,7 @@ vector<float> get_features(timeseries data, float subsample=1.0f, float quantile
   vector<float> time = data.first;
   vector<PointCloud> point_series  = data.second;
   int count = point_series[0].size();
+  int N = time.size();
 
   vector<bool> used(count, true);
   if(subsample < 1.0f)
@@ -152,7 +154,7 @@ vector<float> get_features(timeseries data, float subsample=1.0f, float quantile
   }
 
   vector<float> features;
-  array<vector<float>, QUANTILES * BANDS> Q;
+  array<vector<float>, BANDS> Q;
 
   for(PointCloud point_cloud : point_series)
   {
@@ -181,61 +183,23 @@ vector<float> get_features(timeseries data, float subsample=1.0f, float quantile
 
   for(auto q : Q)
   {
-    float integral = 0;
-    vector<float> smooth(SAMPLES, 0);
-    vector<float> diff(SAMPLES, 0);
-    float max_time = -1e10;
-    float min_time = -1e10;
-    float max      = -1e10;
-    float min      =  1e10;
-    for(size_t t = 0; t < q.size(); ++t)
-    {
-      if(t > 0)
-      {
-        // Do Integral Transforms
-        float dt = time[t] - time[t-1];
-        int subdivs = ceil(dt / 1.0f);
-        float timestep = dt / subdivs;
-        float val_r  =    q[t];
-        float time_r = time[t];
-        for(int s = 0; s < subdivs - 1; ++s)
-        {
-          float lambda = float(s + 1) / subdivs;
-          float val_l  = (1 - lambda) *    q[t] + lambda *    q[t-1];
-          float time_l = (1 - lambda) * time[t] + lambda * time[t-1]; 
+    vector<complex<float>> coefficients(NUM_FOURIER, 0);
 
-          integral += timestep * 0.5 * (val_l + val_r);
-          for(size_t i = 0; i < SAMPLES; i++)
-          {
-            float offset = 2.0f + i * (7.0f / SAMPLES);
-            smooth[i] += timestep * 0.5 * (val_l * esmooth(time_l, offset) + val_r * esmooth(time_r, offset));
-            diff  [i] += timestep * 0.5 * (val_l *   ediff(time_l, offset) + val_r *   ediff(time_r, offset));
-          }
-          val_r  = val_l;
-          time_r = time_l;
-        }
-      }
-      if(q[t] > max)
+    // Non-uniform discrete Fourier transform
+    for(int i = 0; i < N; ++i)
+    {
+      for(int k = 0; k < NUM_FOURIER; ++k)
       {
-        max_time = time[t];
-        max = q[t];
-      }
-      if(q[t] < min)
-      {
-        min_time = time[t];
-        min = q[t];
+        auto cmp = complex<float>(0, -2 * M_PI / 365.0f * time[i] * FREQUENCIES[k]);
+        coefficients[k] += q[i] * exp(cmp);
       }
     }
-
-    features.push_back(integral);
-    for(size_t i = 0; i < SAMPLES; i++)
-      features.push_back(smooth[i]);
-    for(size_t i = 0; i < SAMPLES; i++)
-      features.push_back(diff[i]);
-    features.push_back(min_time);
-    features.push_back(max_time);
+    for(int k = 0; k < NUM_FOURIER; ++k)
+    {
+      features.push_back(coefficients[k].real() / N);
+      features.push_back(coefficients[k].imag() / N);
+    }
   }
-
   return features;
 }
 
