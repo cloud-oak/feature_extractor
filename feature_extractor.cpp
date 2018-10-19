@@ -17,8 +17,8 @@ using namespace std;
 using namespace std::string_literals;
 
 constexpr size_t BLUE   =  0;
-constexpr size_t RED    =  1;
-constexpr size_t GREEN  =  2;
+constexpr size_t GREEN  =  1;
+constexpr size_t RED    =  2;
 constexpr size_t RE1    =  3;
 constexpr size_t RE2    =  4;
 constexpr size_t RE3    =  5;
