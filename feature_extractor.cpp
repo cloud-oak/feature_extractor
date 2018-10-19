@@ -82,7 +82,6 @@ timeseries parse(string filename)
     indexfile.close();
   }
 
-  //  size_t B = raw.shape[0];
   size_t W = raw.shape[1];
   size_t H = raw.shape[2];
   size_t T = raw.shape[3];
@@ -91,7 +90,6 @@ timeseries parse(string filename)
 
   for(size_t t = 0; t < T; ++t)
   {
-    // half_to_float();
     PointCloud points;
     size_t glitchy_points = 0,
            cloudy_points = 0,
@@ -131,9 +129,8 @@ timeseries parse(string filename)
   return make_pair(timestamps, all_points);
 }
 
-vector<float> get_features(timeseries data, float subsample=1.0f, float quantile=0.5f)
+vector<float> get_features(timeseries data, float quantile=0.5f, float subsample=1.0f)
 {
-  // sort(data.begin(), data.end(), [](const auto & a, const auto & b) { return a.first < b.first; });
   vector<float> time = data.first;
   vector<PointCloud> point_series  = data.second;
   int count = point_series[0].size();
@@ -227,7 +224,7 @@ void work(size_t thread_id)
 
     results[thread_id].push_back({ number, 'F', get_features(data, 0.5) });
     for(float quantile : {0.4f, 0.5f, 0.6f})
-      for(float subset : {0.3f, 0.5f, 0.7f})
+      for(float subset : {0.5f, 0.7f})
         results[thread_id].push_back({ number, 'S', get_features(data, subset, quantile) });
   }
   current[thread_id] = "Done";
@@ -304,7 +301,7 @@ int main(int argc, char **argv)
 
   cout << "\nWriting CSV..." << endl;
 
-  ofstream out("/home/konrad/dev/remote_sensing/ibiss_processed/cfeatures.csv");
+  ofstream out("/home/konrad/dev/remote_sensing/data/cfeatures.csv");
 
   for(size_t i = 0; i < 8*NUM_THREADS; ++i)
     cout << '_';
