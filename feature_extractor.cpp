@@ -30,12 +30,12 @@ constexpr size_t CLOUDS =  9;
 constexpr size_t SHAPE  = 10;
 
 constexpr size_t NUM_THREADS = 8;
-constexpr size_t BANDS = 1;
+constexpr size_t BANDS = 3;
 constexpr size_t QUANTILES = 1;
 
 constexpr float START_DAY = 31 + 28; // Only use images starting in March
 
-const vector<float> FREQUENCIES = { 0.0, 1.0, 2.0, 3.0, 4.0, 6 };
+const vector<float> FREQUENCIES = { 0.0, 1.0, 2.0, 3.0, 4.0, 6.0 };
 const int           NUM_FOURIER = FREQUENCIES.size();
 
 typedef array<float, BANDS> Point;
@@ -62,12 +62,12 @@ float clamp(float x, float min=-2, float max=2)
 {
   if (x > max)
   {
-    cout << "Clamped " << x << endl;
+    // cout << "Clamped " << x << endl;
     return max;
   }
   else if (x < min)
   {
-    cout << "Clamped " << x << endl;
+    // cout << "Clamped " << x << endl;
     return min;
   }
   else
@@ -130,13 +130,15 @@ timeseries parse(string filename)
           float r    = DATA(RED),
                 g    = DATA(GREEN),
                 b    = DATA(BLUE),
-                nir  = DATA(NIR);
-                // swir = DATA(SWIR1),
+                nir  = DATA(NIR),
+                swir = DATA(SWIR1);
                 // re2  = DATA(RE2);
           if(r == 0 || g == 0 || b == 0)
             ++glitchy_points;
           points.push_back({
-              clamp((nir  -   r) / (nir  + r + 1e-8)), // NDVI
+              clamp((nir -    r) / (nir  +    r + 1e-8)), // NDVI
+              clamp((nir - swir) / (nir  + swir + 1e-8)), // NDWI
+              clamp(2 * (nir - r) / (nir + 6 * r - 7.5 * b + 1)), // EVI
           });
         }
       }
@@ -174,7 +176,7 @@ void work(size_t thread_id)
         "/home/konrad/dev/remote_sensing/ibiss_processed/cubes/" + number
     );
 
-//    results[thread_id].push_back({ number, 'F', get_features(data) });
+    results[thread_id].push_back({ number, 'F', get_features(data) });
     vector<float> time = data.first;
     vector<PointCloud> point_series = data.second;
     int N = point_series.size();
@@ -279,7 +281,7 @@ int main(int argc, char **argv)
 
   cout << "\nWriting CSV..." << endl;
 
-  ofstream out("/home/konrad/dev/remote_sensing/ibiss_processed/cfeatures.csv");
+  ofstream out("/home/konrad/dev/remote_sensing/data/cfeatures.csv");
 
   for(size_t i = 0; i < 8*NUM_THREADS; ++i)
     cout << '_';
