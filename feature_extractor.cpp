@@ -29,7 +29,7 @@ constexpr size_t CLOUDS =  9;
 constexpr size_t SHAPE  = 10;
 
 constexpr size_t NUM_THREADS = 8;
-constexpr size_t BANDS = 3;
+constexpr size_t BANDS = 4;
 constexpr size_t SAMPLES = 8;
 
 const vector<float> FREQUENCIES = { 0.0, 1.0, 2.0, 3.0, 4.0, 6 };
@@ -105,18 +105,18 @@ timeseries parse(string filename)
           ++total_points;
           if(DATA(CLOUDS) > 0)
             ++cloudy_points;
-          float r    = DATA(RED),
-                g    = DATA(GREEN),
-                b    = DATA(BLUE),
+          float red  = DATA(RED),
+                grn  = DATA(GREEN),
+                blu  = DATA(BLUE),
                 nir  = DATA(NIR),
-                re1  = DATA(RE1),
-                re3  = DATA(RE3);
-          if(r == 0 && g == 0 && b == 0)
+                swir = DATA(SWIR2);
+          if(red == 0 && grn == 0 && blu == 0)
             ++glitchy_points;
           points.push_back({
-              (nir  -   r) / (nir +    r + 0.5f) * 1.5f, // SAVI
-              (   g -   r) / (  r +    g + 0.5f) * 1.5f, // Greenness
-              ( re1 - re3) / (re1 +  re3 + 0.5f) * 1.5f, // RedEdge
+              (nir - red ) / (nir + red), // NDVI
+              2.5f * (nir - red ) / (nir + 6.0f * red - 7.5f * blu + 1.0f), // EVI
+              (nir - swir) / (nir + swir), // NDWI
+              (grn - nir ) / (grn + nir ), // NDWI2
           });
         }
       }
