@@ -5,6 +5,7 @@ project(feature_extractor LANGUAGES CXX)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/FindTBB")
 
 find_package(TBB COMPONENTS tbbmalloc tbbmalloc_proxy)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fPIC -Wall -Wextra -march=native -Wno-unknown-pragmas -pthread -O3")
 
@@ -25,4 +26,5 @@ target_link_libraries(
   cnpy
   pthread
   tbb
+  Eigen3::Eigen
 )

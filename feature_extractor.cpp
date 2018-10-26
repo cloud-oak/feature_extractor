@@ -1,6 +1,5 @@
 #include <iostream>
 #include <string>
-// #include <utility> ?
 #include <vector>
 #include "cnpy.h"
 #include "float_conversion.h"
@@ -11,9 +10,11 @@
 #include <queue>
 #include <algorithm>
 #include <random>
-#include <complex>
+#include <Eigen/Dense>
+#include <sys/stat.h>
 
 using namespace std;
+using namespace Eigen;
 using namespace std::string_literals;
 
 constexpr size_t BLUE   =  0;
@@ -29,15 +30,17 @@ constexpr size_t CLOUDS =  9;
 constexpr size_t SHAPE  = 10;
 
 constexpr size_t NUM_THREADS = 8;
-constexpr size_t BANDS = 4;
-constexpr size_t SAMPLES = 8;
+constexpr size_t BANDS = 6;
 
-const vector<float> FREQUENCIES = { 0.0, 1.0, 2.0, 3.0, 4.0, 6 };
-const int NUM_FOURIER = FREQUENCIES.size();
+const array<float, 3> QUANTILES {0.2f, 0.5f, 0.8f};
+const size_t QS = QUANTILES.size();
 
 typedef array<float, BANDS> Point;
 typedef vector<Point> PointCloud;
 typedef pair<vector<float>, vector<PointCloud>> timeseries;
+
+constexpr float START_DAY = 31 + 28; // Only use images starting in March
+constexpr float MAX_DAY   = 365 - START_DAY - 31; // End with November
 
 time_t basetime;
 
@@ -55,6 +58,18 @@ mutex queue_lock;
 queue<string> todo;
 
 #define DATA(b) half_to_float(raw.data<uint16_t>()[ b * W * H * T + x * H * T + y * T + t ])
+
+float clamp(float x, float min=-100, float max=100)
+{
+  if (x > max)
+    return max;
+  else if (x < min)
+    return min;
+  else if (isnormal(x))
+    return x;
+  else
+    return 0;
+}
 
 timeseries parse(string filename)
 {
@@ -76,7 +91,7 @@ timeseries parse(string filename)
     {
       struct tm tm;
       strptime(line.c_str(), "%Y-%m-%dT%H:%M:%S", &tm);
-      float diff = difftime(mktime(&tm), basetime) / (60 * 60 * 24);
+      float diff = difftime(mktime(&tm), basetime) / (60 * 60 * 24) - START_DAY;
       timestamps.push_back(diff);
     }
     indexfile.close();
@@ -85,38 +100,57 @@ timeseries parse(string filename)
   size_t W = raw.shape[1];
   size_t H = raw.shape[2];
   size_t T = raw.shape[3];
+  vector<float> used_timestamps;
 
   assert(timestamps.size() == T);
 
   for(size_t t = 0; t < T; ++t)
   {
+    if(timestamps[t] <= 0)
+      continue;
     PointCloud points;
     size_t glitchy_points = 0,
            cloudy_points = 0,
            total_points = 0;
-    for(size_t x = 0; x < W; ++x)
+    for(size_t x = 0; x < W; ++x) for(size_t y = 0; y < H; ++y)
     {
-      for(size_t y = 0; y < H; ++y)
+      if(DATA(SHAPE) > 0)
       {
-        if(DATA(SHAPE) > 0)
-        {
-          ++total_points;
-          if(DATA(CLOUDS) > 0)
-            ++cloudy_points;
-          float red  = DATA(RED),
-                grn  = DATA(GREEN),
-                blu  = DATA(BLUE),
-                nir  = DATA(NIR),
-                swir = DATA(SWIR2);
-          if(red == 0 && grn == 0 && blu == 0)
-            ++glitchy_points;
-          points.push_back({
-              (nir - red ) / (nir + red), // NDVI
-              2.5f * (nir - red ) / (nir + 6.0f * red - 7.5f * blu + 1.0f), // EVI
-              (nir - swir) / (nir + swir), // NDWI
-              (grn - nir ) / (grn + nir ), // NDWI2
-          });
-        }
+        ++total_points;
+        if(DATA(CLOUDS) > 0)
+          ++cloudy_points;
+        float red  = DATA(RED),
+              grn  = DATA(GREEN),
+              blu  = DATA(BLUE),
+              nir  = DATA(NIR),
+              swir1= DATA(SWIR1),
+              swir2= DATA(SWIR2),
+              re1  = DATA(RE1),
+              re2  = DATA(RE2),
+              re3  = DATA(RE3);
+        if(red == 0 && grn == 0 && blu == 0)
+          ++glitchy_points;
+        float ndvi = (nir - red) / (nir + red); // Normalized Difference Vegetation Index
+        float cai = (swir1 - swir2) / (swir1 + swir2); // Cellulose Absorption index
+        float n = (2 * (nir * nir - red * red) + 1.5f * nir + 0.5 * red ) / (nir + red + 0.5f);
+        float gemi = n * (1.0f - 0.25f * n) - (red - 0.125f) / (1 - red); // Global Environment Monitoring Index
+        float gli = (2 * grn - red - blu) / (2 * grn + red + blu); // Green Leaf Index
+        float cvi = (nir * red) / (grn * grn); // Chlorophyll vegetation index
+        float ccci = ((nir - re1) / (nir + re1)) / ndvi; // Canopy Chlorophyll Content Index
+        float dswi = (re3 - grn) / (swir1 + red); // Disease-Water Stress Index 5
+        float nd790_670 = (re3 - red) / (re3 + red); // Normalized Difference 790 / 670
+        float ndwi = (nir - swir2) / (nir + swir2); // Normalized Difference Water Index
+        points.push_back({
+            clamp(ndvi),
+            // clamp(cai),
+            clamp(gemi),
+            clamp(gli),
+            clamp(cvi),
+            // clamp(ccci),
+            clamp(dswi),
+            // clamp(nd790_670),
+            clamp(ndwi),
+        });
       }
     }
     if(cloudy_points > 0.2 * total_points)
@@ -124,17 +158,22 @@ timeseries parse(string filename)
     if(glitchy_points > 0.2 * total_points)
       continue;
     all_points.push_back(points);
+    used_timestamps.push_back(timestamps[t] / MAX_DAY);
   }
 
-  return make_pair(timestamps, all_points);
+  return make_pair(used_timestamps, all_points);
 }
 
-vector<float> get_features(timeseries data, float quantile=0.5f, float subsample=1.0f)
+inline float hat(float t, float center, float width)
+{
+  return max(1 - abs(t-center) / width, 0.0f) / width;
+}
+
+const vector<float> get_features(timeseries data, float subsample=1.0f)
 {
   vector<float> time = data.first;
   vector<PointCloud> point_series  = data.second;
   int count = point_series[0].size();
-  int N = time.size();
 
   vector<bool> used(count, true);
   if(subsample < 1.0f)
@@ -151,7 +190,7 @@ vector<float> get_features(timeseries data, float quantile=0.5f, float subsample
   }
 
   vector<float> features;
-  array<vector<float>, BANDS> Q;
+  array<vector<float>, BANDS * QS> Q;
 
   for(PointCloud point_cloud : point_series)
   {
@@ -168,36 +207,51 @@ vector<float> get_features(timeseries data, float quantile=0.5f, float subsample
       if(points.size() > 0)
       {
         sort(points.begin(), points.end());
-
-        Q[band].push_back(points[size_t(points.size() * quantile)]);
+        for(size_t q = 0; q < QS; ++q)
+          Q[band * QS + q].push_back(points[size_t(points.size() * QUANTILES[q])]);
       }
       else
       {
-        Q[band].push_back(0);
+        for(float q : QUANTILES)
+          Q[band * QS + q].push_back(0);
       }
     }
   }
 
   for(auto q : Q)
   {
-    vector<complex<float>> coefficients(NUM_FOURIER, 0);
-
-    // Non-uniform discrete Fourier transform
-    for(int i = 0; i < N; ++i)
+    constexpr size_t DIM = 8;
+    // vector<complex<float>> coefficients(NUM_FOURIER, 0);
+    Eigen::Matrix<float, Eigen::Dynamic, DIM> model(q.size(), DIM);
+    Eigen::Matrix<float, Eigen::Dynamic, 1> target(q.size(), 1);
+    for(size_t k = 0; k < q.size(); ++k)
     {
-      for(int k = 0; k < NUM_FOURIER; ++k)
-      {
-        auto cmp = complex<float>(0, -2 * M_PI / 365.0f * time[i] * FREQUENCIES[k]);
-        coefficients[k] += q[i] * exp(cmp);
-      }
+      target(k, 0) = q[k];
+      model(k, 0)  = hat(time[k], 0.0f  , 1.0f  ); // Left Edge
+      model(k, 1)  = hat(time[k], 1.0f  , 1.0f  ); // Right Edge
+      model(k, 2)  = hat(time[k], 0.5f  , 0.5f  ); // 1/2
+      model(k, 3)  = hat(time[k], 0.25f , 0.25f ); // 1/4
+      model(k, 4)  = hat(time[k], 0.75f , 0.25f ); // 3/4
+      model(k, 5)  = hat(time[k], 0.125f, 0.125f); // 1/8
+      model(k, 6)  = hat(time[k], 0.375f, 0.125f); // 3/8
+      model(k, 7)  = hat(time[k], 0.625f, 0.125f); // 5/8
+      // model(k, 8)  = hat(time[k], 0.875f, 0.125f); // 7/8
     }
-    for(int k = 0; k < NUM_FOURIER; ++k)
+    Eigen::Matrix<float, DIM, DIM> H = model.transpose() * model;
+    H = H.completeOrthogonalDecomposition().pseudoInverse();
+    Eigen::Matrix<float, DIM, 1> weight = H * model.transpose() * target;
+    for(size_t k = 0; k < DIM; ++k)
     {
-      features.push_back(coefficients[k].real() / N);
-      features.push_back(coefficients[k].imag() / N);
+      features.push_back(weight(k, 0));
     }
   }
   return features;
+}
+
+inline bool file_exists (const std::string& name)
+{
+  struct stat buffer;
+  return (stat (name.c_str(), &buffer) == 0); 
 }
 
 void work(size_t thread_id)
@@ -218,14 +272,13 @@ void work(size_t thread_id)
         todo.pop();
       }
     }
-    timeseries data = parse(
-        "/home/konrad/dev/remote_sensing/ibiss_processed/cubes/" + number
-    );
+    
+    string filename = "/home/konrad/dev/remote_sensing/ibiss_processed/cubes/" + number;
+    if(!file_exists(filename + ".npy"s))
+      continue;
+    timeseries data = parse(filename);
 
     results[thread_id].push_back({ number, 'F', get_features(data, 0.5) });
-    for(float quantile : {0.4f, 0.5f, 0.6f})
-      for(float subset : {0.5f, 0.7f})
-        results[thread_id].push_back({ number, 'S', get_features(data, subset, quantile) });
   }
   current[thread_id] = "Done";
 }
